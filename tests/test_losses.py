@@ -14,7 +14,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from unme.train.losses import (  # noqa: E402  (import after skip guard)
+from unme.train.losses import (
     hidden_state_match_loss,
     topk_kl_loss,
 )

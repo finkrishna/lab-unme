@@ -14,7 +14,6 @@ Design notes:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -51,7 +50,7 @@ class StepLogits(BaseModel):
     logprobs: list[float]
 
     @model_validator(mode="after")
-    def _same_length(self) -> "StepLogits":
+    def _same_length(self) -> StepLogits:
         if len(self.token_ids) != len(self.logprobs):
             raise ValueError("token_ids and logprobs must have equal length (top-k)")
         return self
@@ -67,13 +66,13 @@ class Trace(BaseModel):
     input_ids: list[int]            # tokenized prompt
     output_ids: list[int]          # tokenized teacher continuation (the hard labels)
     steps: list[StepLogits]        # len == len(output_ids); top-k soft targets
-    hidden_path: Optional[str] = None  # path to .npz of teacher hidden states, if emitted
+    hidden_path: str | None = None  # path to .npz of teacher hidden states, if emitted
     topk: int
     temperature: float
     meta: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _steps_align(self) -> "Trace":
+    def _steps_align(self) -> Trace:
         if len(self.steps) != len(self.output_ids):
             raise ValueError("steps must align 1:1 with output_ids")
         return self
