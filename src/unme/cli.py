@@ -165,5 +165,85 @@ def promote_cmd(
     console.print(f"[green]promoted[/green] {candidate} → {path}")
 
 
+def _dataset_load_smoke(config: Path, data: Path | None = None) -> None:
+    """Load DistillDataset only (no training). Safe without GPU; needs torch for tensors."""
+    cfg = _load_yaml(config) if config.exists() else {}
+    data_path = data or Path((cfg.get("data") or {}).get("filtered", "data/filtered"))
+    kept = data_path / "kept.jsonl" if data_path.is_dir() else data_path
+    if not Path(kept).exists():
+        console.print(f"[red]No filtered data at {kept} for dataset load.[/red]")
+        raise typer.Exit(1)
+    try:
+        from unme.data.dataset import DistillDataset
+
+        ds = DistillDataset(kept if Path(kept).suffix == ".jsonl" else data_path)
+        console.print(f"[bold]dataset[/bold] loaded n={len(ds)} from {kept}")
+    except ImportError:
+        console.print(
+            "[yellow]torch not installed; skip DistillDataset load "
+            "(install 'lab-unme[train]' for full smoke).[/yellow]"
+        )
+
+
+@app.command("run")
+def run_cmd(
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    skip_train: Annotated[
+        bool,
+        typer.Option("--skip-train", help="Skip train; still smoke-load DistillDataset"),
+    ] = False,
+    candidate: Annotated[
+        str,
+        typer.Option("--candidate", help="Name recorded under the registry"),
+    ] = "unme-run",
+    registry: Annotated[Path, typer.Option("--registry", "-r")] = _DEFAULT_REGISTRY,
+    domain: Annotated[
+        str | None,
+        typer.Option(help="Filter domain hint (math|code|cs)"),
+    ] = "cs",
+) -> None:
+    """Chain generate → filter → train → eval → promote from distill.yaml.
+
+    With ``--skip-train``, training is skipped (no GPU required) but filtered
+    traces are still loaded via DistillDataset when torch is available.
+    """
+    cfg = _load_yaml(config) if config.exists() else {}
+    data_cfg = cfg.get("data") or {}
+    traces_dir = Path(data_cfg.get("traces", "data/traces"))
+    filtered_dir = Path(data_cfg.get("filtered", "data/filtered"))
+    prompts_path = Path(data_cfg.get("prompts", "data/prompts/pilot.jsonl"))
+
+    console.rule("[bold]unme run")
+    console.print(f"config={config} skip_train={skip_train} candidate={candidate}")
+
+    # 1) generate
+    generate_cmd(config=config, prompts=prompts_path, out=traces_dir)
+
+    # 2) filter
+    filter_cmd(traces=traces_dir, out=filtered_dir, domain=domain)
+
+    # 3) train (or dataset-load only)
+    if skip_train:
+        console.print("[yellow]--skip-train: omitting train_cmd[/yellow]")
+        _dataset_load_smoke(config, data=filtered_dir)
+    else:
+        train_cmd(config=config, data=filtered_dir, out=_DEFAULT_OUT)
+
+    # 4) eval
+    eval_cmd(candidate=candidate, config=config, registry=registry)
+
+    # 5) promote (may refuse until real eval scores pass the gate)
+    try:
+        promote_cmd(candidate=candidate, registry=registry)
+    except typer.Exit as exc:
+        if getattr(exc, "exit_code", 1) not in (0, None):
+            console.print(
+                "[yellow]promote refused (gate). Pipeline stages above still completed.[/yellow]"
+            )
+            if not skip_train:
+                raise
+        # with --skip-train, placeholder eval often fails the floor; do not fail the chain
+
+
 if __name__ == "__main__":
     app()
