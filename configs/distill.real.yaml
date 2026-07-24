@@ -1,0 +1,65 @@
+# Lab UnMe — REAL-RUN profile (Kimi K3 teacher → small shared-tokenizer student).
+# Scaffold smoke config remains configs/distill.yaml (tiny HF models, no endpoint).
+# Usage:
+#   export MOONSHOT_API_KEY=...   # or TEACHER_API_KEY for self-hosted
+#   unme run --config configs/distill.real.yaml
+#
+# Keys match what teacher/generate.py and train/distill.py already read.
+# Do not invent new top-level sections.
+
+teacher:
+  # OpenAI-compatible completions base (vLLM / SGLang / Moonshot).
+  # Examples:
+  #   http://127.0.0.1:8000/v1          # self-hosted K3
+  #   https://api.moonshot.ai/v1        # Moonshot API (if completions + logprobs enabled)
+  base_url: "http://127.0.0.1:8000/v1"
+  # Served model id as registered with the inference server (not necessarily HF path).
+  model: "kimi-k3"
+  # Tokenizer for turning teacher token *strings* into ids (must match teacher vocab).
+  # Prefer the official Kimi K3 tokenizer repo once weights/tokenizer are published.
+  tokenizer: "moonshotai/Kimi-K3"   # TODO: confirm exact HF / release tokenizer id
+  dtype: "bfloat16"
+  topk: 20                          # sparse logprobs per position (OpenAI logprobs=N)
+  temperature: 1.0
+  max_tokens: 2048
+  timeout: 300.0
+  # Prefer env; empty string is fine for unauthenticated local vLLM.
+  # PyYAML does not expand ${env} — set via process env and map in your launcher,
+  # or paste a key here for a private machine only (do not commit secrets).
+  api_key: ""                       # export MOONSHOT_API_KEY / pass via shell wrapper
+  # Completions APIs cannot return true hidden states; keep false + alpha_hidden 0.
+  emit_hidden_states: false
+
+student:
+  # INVARIANT (enforced in train/distill.py): student vocab must cover teacher token ids.
+  # Use a small open model that SHARES the teacher tokenizer (same vocab / merge rules).
+  # TODO: confirm exact student checkpoint id once K3 tokenizer is fixed above.
+  # Placeholder: swap for a real dense/MoE student that loads the Kimi tokenizer.
+  model: "moonshotai/Kimi-K3-Student-TODO"   # TODO: real small open model with K3 tokenizer
+  dtype: "bfloat16"
+
+data:
+  prompts: "data/prompts/pilot.jsonl"
+  traces: "data/traces"
+  filtered: "data/filtered"
+  max_seq_len: 4096
+
+distill:
+  temperature: 2.0
+  alpha_kl: 1.0
+  alpha_hidden: 0.0                 # raise only with real teacher hiddens
+  alpha_ce: 0.1
+  # Layer map only matters when alpha_hidden > 0 and hidden_path is populated.
+  hidden_layer_map: {2: 4, 4: 8}
+  lr: 1.0e-4
+  batch_size: 2
+  epochs: 2
+  grad_clip: 1.0
+
+eval:
+  suite: "data/eval"
+  # Candidate promotes only if student/teacher >= floor on EVERY domain.
+  regression_floor: 0.98
+
+# Optional; train/distill.py defaults to outputs/student when unset.
+output_dir: "outputs/student-k3"
