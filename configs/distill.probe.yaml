@@ -1,0 +1,52 @@
+# Lab UnMe — PROBE profile (3-prompt slice for teacher logprobs validation).
+# Same key structure as configs/distill.real.yaml / what generate.py + distill.py read.
+# Usage:
+#   python scripts/probe_teacher.py --config configs/distill.probe.yaml
+#   unme run --config configs/distill.probe.yaml --skip-train --candidate probe
+#
+# Scaffold smoke remains configs/distill.yaml. Full real-run: distill.real.yaml.
+
+teacher:
+  # OpenAI-compatible completions base (vLLM / SGLang / Moonshot).
+  base_url: "http://127.0.0.1:8000/v1"
+  model: "kimi-k3"
+  # Tokenizer for Trace id resolution during generate (must match teacher vocab).
+  tokenizer: "moonshotai/Kimi-K3"   # TODO: confirm exact HF / release tokenizer id
+  dtype: "bfloat16"
+  topk: 20
+  temperature: 1.0
+  # Probe uses max_tokens~5 via scripts/probe_teacher.py; generate may use this default.
+  max_tokens: 256
+  timeout: 120.0
+  # Leave empty for local vLLM; or set via MOONSHOT_API_KEY / TEACHER_API_KEY in the probe script.
+  api_key: ""
+  emit_hidden_states: false
+
+student:
+  # Shared-tokenizer invariant (train/distill.py vocab assert).
+  model: "moonshotai/Kimi-K3-Student-TODO"   # TODO: real small open model with K3 tokenizer
+  dtype: "bfloat16"
+
+data:
+  # Tiny 3-line subset of pilot (not the full pilot.jsonl).
+  prompts: "data/prompts/pilot_probe.jsonl"
+  traces: "data/traces"
+  filtered: "data/filtered"
+  max_seq_len: 2048
+
+distill:
+  temperature: 2.0
+  alpha_kl: 1.0
+  alpha_hidden: 0.0
+  alpha_ce: 0.1
+  hidden_layer_map: {2: 4, 4: 8}
+  lr: 1.0e-4
+  batch_size: 1
+  epochs: 1
+  grad_clip: 1.0
+
+eval:
+  suite: "data/eval"
+  regression_floor: 0.98
+
+output_dir: "outputs/student-probe"

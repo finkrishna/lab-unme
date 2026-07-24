@@ -6,6 +6,41 @@ and promoting only if the regression gate passes.
 
 Scaffold / CI smoke continues to use `configs/distill.yaml` (tiny HF models).
 **Production-shaped runs use `configs/distill.real.yaml`.**
+**Probe / step validation uses `configs/distill.probe.yaml` (3-prompt slice).**
+
+---
+
+## Step 1/2 validation (before a full real run)
+
+Confirm the served teacher returns **per-token top-k logprobs** and that the short
+pipeline path works offline of heavy training.
+
+**Step 1 — teacher logprobs probe** (one short `/completions` call via
+`TeacherLogitsClient`; exit 0 = PASS):
+
+```bash
+# Edit configs/distill.probe.yaml: teacher.base_url / model (+ api_key env if needed)
+python scripts/probe_teacher.py --config configs/distill.probe.yaml
+```
+
+Optional flags: `--base-url`, `--model`, `--topk`, `--max-tokens 5`, `--api-key` (never printed).
+
+**Step 2 — short `unme run` without train** (uses the 3-line prompt set at
+`data/prompts/pilot_probe.jsonl`; full pilot remains `data/prompts/pilot.jsonl`):
+
+```bash
+unme run --config configs/distill.probe.yaml --skip-train --candidate probe
+```
+
+Notes:
+
+- Probe config points `data.prompts` at **`pilot_probe.jsonl`** (3 lines). For a
+  full curriculum, switch to `pilot.jsonl` or set a larger file in config (there is
+  no generate `--limit` flag yet — use the probe subset file instead).
+- Step 2 still requires a live `teacher.base_url` unless you pass `--skip-generate`
+  and already have Trace JSONL under `data/traces`.
+- Placeholder eval may refuse promote under `--skip-train`; that is expected until
+  real suite scores are recorded.
 
 ---
 
