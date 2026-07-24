@@ -192,6 +192,13 @@ def run_cmd(
         bool,
         typer.Option("--skip-train", help="Skip train; still smoke-load DistillDataset"),
     ] = False,
+    skip_generate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-generate",
+            help="Skip teacher generate; reuse existing Trace JSONL under data.traces",
+        ),
+    ] = False,
     candidate: Annotated[
         str,
         typer.Option("--candidate", help="Name recorded under the registry"),
@@ -206,6 +213,8 @@ def run_cmd(
 
     With ``--skip-train``, training is skipped (no GPU required) but filtered
     traces are still loaded via DistillDataset when torch is available.
+
+    With ``--skip-generate``, reuse existing traces (no teacher endpoint needed).
     """
     cfg = _load_yaml(config) if config.exists() else {}
     data_cfg = cfg.get("data") or {}
@@ -214,10 +223,32 @@ def run_cmd(
     prompts_path = Path(data_cfg.get("prompts", "data/prompts/pilot.jsonl"))
 
     console.rule("[bold]unme run")
-    console.print(f"config={config} skip_train={skip_train} candidate={candidate}")
+    console.print(
+        f"config={config} skip_train={skip_train} "
+        f"skip_generate={skip_generate} candidate={candidate}"
+    )
 
-    # 1) generate
-    generate_cmd(config=config, prompts=prompts_path, out=traces_dir)
+    # 1) generate (unless --skip-generate)
+    if skip_generate:
+        console.print(
+            f"[yellow]--skip-generate: reusing traces in {traces_dir}[/yellow]"
+        )
+        if not traces_dir.exists() or not any(traces_dir.glob("*.jsonl")):
+            console.print(
+                f"[red]No Trace JSONL under {traces_dir}. "
+                "Run generate first or point data.traces at existing traces.[/red]"
+            )
+            raise typer.Exit(1)
+    else:
+        base_url = str((cfg.get("teacher") or {}).get("base_url") or "").strip()
+        if not base_url:
+            console.print(
+                f"unme run needs a teacher endpoint. Set teacher.base_url in {config}\n"
+                f"(see configs/distill.real.yaml), or pass --skip-generate to reuse existing\n"
+                f"traces in {traces_dir}."
+            )
+            raise typer.Exit(1)
+        generate_cmd(config=config, prompts=prompts_path, out=traces_dir)
 
     # 2) filter
     filter_cmd(traces=traces_dir, out=filtered_dir, domain=domain)

@@ -177,3 +177,110 @@ def test_run_skip_train_generate_filter_dataset(tmp_path: Path, monkeypatch: pyt
     for key in ("input_ids", "output_ids", "teacher_top_ids", "teacher_top_logprobs"):
         assert key in item
     assert "dataset" in result.output.lower() or "loaded" in result.output.lower()
+
+
+def test_run_missing_base_url_exits_nonzero(tmp_path: Path):
+    """No teacher.base_url and no --skip-generate → clear error, non-zero exit."""
+    config_path = tmp_path / "distill.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "teacher": {"model": _TINY, "topk": 4},  # deliberately no base_url
+                "data": {
+                    "prompts": str(tmp_path / "prompts.jsonl"),
+                    "traces": str(tmp_path / "traces"),
+                    "filtered": str(tmp_path / "filtered"),
+                },
+            }
+        )
+    )
+    result = _RUNNER.invoke(
+        app,
+        ["run", "--config", str(config_path), "--skip-train", "--candidate", "no-url"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    out = result.output
+    assert "unme run needs a teacher endpoint" in out
+    assert "teacher.base_url" in out
+    assert "--skip-generate" in out
+    assert "distill.real.yaml" in out
+
+
+def test_run_skip_generate_skip_train_from_seeded_traces(tmp_path: Path):
+    """--skip-generate --skip-train: filter → dataset-load from pre-seeded traces."""
+    from unme.schemas import StepLogits, Trace
+
+    traces_dir = tmp_path / "traces"
+    traces_dir.mkdir()
+    filtered_dir = tmp_path / "filtered"
+    registry_dir = tmp_path / "registry"
+
+    # Valid code trace so CodeVerifier keeps it (domain cs).
+    out_ids = [10, 11, 12, 13]
+    steps = [
+        StepLogits(token_ids=[oid, oid + 1], logprobs=[0.0, -2.0]) for oid in out_ids
+    ]
+    tr = Trace(
+        prompt_id="cs-seed-1",
+        domain="cs",
+        teacher_model="seed-teacher",
+        input_ids=[1, 2, 3, 4],
+        output_ids=out_ids,
+        steps=steps,
+        topk=2,
+        temperature=1.0,
+        meta={
+            "prompt": (
+                "Write add(a, b).\n\n## tests\n"
+                "assert add(2, 3) == 5\n"
+                "assert add(0, 0) == 0\n"
+            ),
+            "completion": "```python\ndef add(a, b):\n    return a + b\n```\n",
+        },
+    )
+    with (traces_dir / "cs.jsonl").open("wb") as f:
+        f.write(orjson.dumps(tr.model_dump(mode="json")))
+        f.write(b"\n")
+
+    config_path = tmp_path / "distill.yaml"
+    # No base_url — ok because --skip-generate
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "teacher": {"model": "seed-teacher", "topk": 2},
+                "data": {
+                    "traces": str(traces_dir),
+                    "filtered": str(filtered_dir),
+                },
+                "eval": {"regression_floor": 0.98},
+            }
+        )
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(config_path),
+            "--skip-generate",
+            "--skip-train",
+            "--candidate",
+            "seed-smoke",
+            "--registry",
+            str(registry_dir),
+            "--domain",
+            "cs",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "--skip-generate" in result.output or "reusing traces" in result.output.lower()
+    kept = filtered_dir / "kept.jsonl"
+    assert kept.exists(), result.output
+    assert len([ln for ln in kept.read_bytes().splitlines() if ln]) >= 1
+    ds = DistillDataset(kept)
+    assert len(ds) >= 1
+    # placeholder eval usually fails promote floor; chain must not crash under --skip-train
+    assert "promote refused" in result.output.lower() or "gate" in result.output.lower()
