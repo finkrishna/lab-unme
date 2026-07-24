@@ -1,0 +1,169 @@
+"""Typer CLI entrypoint (`unme`). Subcommands wire pipeline stages."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+
+app = typer.Typer(
+    name="unme",
+    help="Lab UnMe — open-weight distillation pipeline (Kimi K3 → student)",
+    no_args_is_help=True,
+)
+console = Console()
+
+_DEFAULT_CONFIG = Path("configs/distill.yaml")
+_DEFAULT_TRACES = Path("data/traces")
+_DEFAULT_FILTERED = Path("data/filtered")
+_DEFAULT_OUT = Path("outputs/student")
+_DEFAULT_REGISTRY = Path("outputs/registry")
+
+
+def _load_yaml(path: Path) -> dict:
+    import yaml
+
+    with path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+@app.command("generate")
+def generate_cmd(
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    prompts: Annotated[
+        Path | None, typer.Option(help="Prompt JSONL (overrides config)")
+    ] = None,
+    out: Annotated[Path | None, typer.Option(help="Output traces dir")] = None,
+) -> None:
+    """Stage 1: run teacher to emit Trace JSONL with top-k logits."""
+    cfg = _load_yaml(config) if config.exists() else {}
+    traces_dir = out or Path((cfg.get("data") or {}).get("traces", "data/traces"))
+    prompts_path = prompts or Path(
+        (cfg.get("data") or {}).get("prompts", "data/prompts/pilot.jsonl")
+    )
+    console.print(f"[bold]generate[/bold] prompts={prompts_path} → {traces_dir}")
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from unme.teacher.generate import generate as run_generate  # GLM Task 2
+    except ImportError:
+        console.print(
+            "[yellow]teacher.generate not implemented yet (GLM Task 2). It must emit "
+            "unme.schemas.Trace JSONL (top-k logits) into the traces dir.[/yellow]"
+        )
+        raise typer.Exit(0)
+    run_generate(str(prompts_path), str(traces_dir), cfg)
+
+
+@app.command("filter")
+def filter_cmd(
+    traces: Annotated[Path, typer.Option("--traces", "-t")] = _DEFAULT_TRACES,
+    out: Annotated[Path, typer.Option("--out", "-o")] = _DEFAULT_FILTERED,
+    domain: Annotated[
+        str | None,
+        typer.Option(help="Hint: math|code — selects default verifiers"),
+    ] = None,
+) -> None:
+    """Stage 1b: strict synth filter → kept.jsonl + verdicts.jsonl."""
+    from unme.synth.filter import filter_traces
+    from unme.verify import CodeVerifier, MathVerifier
+
+    verifiers = []
+    d = (domain or "").lower()
+    if d in {"math", "stem", ""}:
+        verifiers.append(MathVerifier())
+    if d in {"code", "cs", "coding", ""}:
+        verifiers.append(CodeVerifier())
+
+    console.print(
+        f"[bold]filter[/bold] {traces} → {out} "
+        f"verifiers={[type(v).__name__ for v in verifiers]}"
+    )
+    verdicts = filter_traces(traces, out, verifiers=verifiers)
+    n_keep = sum(1 for v in verdicts if v.keep)
+    console.print(f"kept={n_keep} / considered_verdicts={len(verdicts)}")
+
+
+@app.command("train")
+def train_cmd(
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    data: Annotated[
+        Path | None, typer.Option(help="Filtered traces JSONL/dir")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out")] = _DEFAULT_OUT,
+) -> None:
+    """Stage 2: distillation training over filtered traces (spec launcher)."""
+    cfg = _load_yaml(config) if config.exists() else {}
+    data_path = data or Path((cfg.get("data") or {}).get("filtered", "data/filtered"))
+    console.print(f"[bold]train[/bold] data={data_path} out={out}")
+
+    kept = data_path / "kept.jsonl" if data_path.is_dir() else data_path
+    if not Path(kept).exists():
+        console.print(f"[red]No training data at {kept}. Run `unme filter` first.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        from unme.data.dataset import DistillDataset
+
+        ds = DistillDataset(kept if Path(kept).suffix == ".jsonl" else data_path)
+        console.print(f"Loaded DistillDataset n={len(ds)}")
+    except ImportError:
+        console.print("[yellow]torch not installed; skipping dataset load smoke check[/yellow]")
+
+    out.mkdir(parents=True, exist_ok=True)
+    console.print(
+        "[green]Data ready.[/green] Launch train/distill.py (or your trainer) with this data path."
+    )
+
+
+@app.command("eval")
+def eval_cmd(
+    candidate: Annotated[str, typer.Argument(help="Candidate name / checkpoint id")],
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    registry: Annotated[Path, typer.Option("--registry", "-r")] = _DEFAULT_REGISTRY,
+) -> None:
+    """Stage 0/3: evaluate candidate, write GateReport into the registry."""
+    from unme.registry import Registry
+    from unme.schemas import EvalResult, GateReport
+
+    cfg = _load_yaml(config) if config.exists() else {}
+    floor = float((cfg.get("eval") or {}).get("regression_floor", 0.98))
+
+    console.print(f"[bold]eval[/bold] candidate={candidate} floor={floor}")
+    report = GateReport(
+        candidate=candidate,
+        results=[
+            EvalResult(domain="math", metric="holdout", student_score=0.0, teacher_score=1.0),
+        ],
+        regression_floor=floor,
+    )
+    reg = Registry(registry)
+    path = reg.record(candidate, report)
+    console.print(f"Wrote {path} passed={report.passed}")
+    if not report.passed:
+        console.print(
+            "[yellow]Gate not passed (placeholder scores). "
+            "Record real eval results before promote.[/yellow]"
+        )
+
+
+@app.command("promote")
+def promote_cmd(
+    candidate: Annotated[str, typer.Argument(help="Candidate to promote")],
+    registry: Annotated[Path, typer.Option("--registry", "-r")] = _DEFAULT_REGISTRY,
+) -> None:
+    """Promote a candidate only if its GateReport.passed is True."""
+    from unme.registry import PromotionError, Registry
+
+    reg = Registry(registry)
+    try:
+        path = reg.promote(candidate)
+    except PromotionError as e:
+        console.print(f"[red]promote refused:[/red] {e}")
+        raise typer.Exit(1) from e
+    console.print(f"[green]promoted[/green] {candidate} → {path}")
+
+
+if __name__ == "__main__":
+    app()

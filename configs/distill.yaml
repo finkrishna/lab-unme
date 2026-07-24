@@ -1,0 +1,48 @@
+# Lab UnMe distillation config.
+# Swap the tiny smoke-test models for real checkpoints to scale up.
+
+teacher:
+  model: "hf-internal-testing/tiny-random-gpt2"   # -> Kimi K3 open weights at scale
+  dtype: "float32"                                  # bf16 at scale
+  # Sparse logit distillation: store only the top-k teacher logits per position.
+  # At a 2.7T teacher + large vocab, dense logits are infeasible to store; top-k
+  # captures nearly all the probability mass at a fraction of the storage.
+  topk: 64
+  # OFF until a weights-pass teacher backend emits REAL hidden states. The
+  # OpenAI-completions client cannot return them; emitting zero placeholders and
+  # training the MSE hidden term against them drives the student's hidden toward
+  # zero. Keep this false and distill.alpha_hidden at 0.0 until then.
+  emit_hidden_states: false
+
+student:
+  # INVARIANT: the student MUST use the teacher's tokenizer. Top-k logit
+  # distillation matches probabilities over shared token ids — a different
+  # vocab makes the targets meaningless. Same tokenizer here as teacher.
+  model: "hf-internal-testing/tiny-random-gpt2"   # -> your smaller student arch
+  dtype: "float32"
+
+data:
+  prompts: "data/prompts/pilot.jsonl"             # one domain first, then scale
+  traces: "data/traces"                           # teacher outputs + top-k logits
+  filtered: "data/filtered"                       # post-synth-filter, training-ready
+  max_seq_len: 256
+
+distill:
+  temperature: 2.0
+  # Loss = alpha_kl * KL(topk logits) + alpha_hidden * hidden_match + alpha_ce * hard_label_CE
+  alpha_kl: 1.0
+  alpha_hidden: 0.0   # -> raise only once real teacher hidden states exist (see emit_hidden_states)
+  alpha_ce: 0.1
+  # Map student layers -> teacher layers for hidden-state matching (student_idx: teacher_idx).
+  # A projection is learned per pair to reconcile differing hidden sizes.
+  hidden_layer_map: {2: 4, 4: 8}
+  lr: 2.0e-4
+  batch_size: 4
+  epochs: 1
+  grad_clip: 1.0
+
+eval:
+  suite: "data/eval"
+  # Regression gate: a checkpoint promotes only if it stays within this fraction
+  # of the teacher on every domain (no domain may regress below the floor).
+  regression_floor: 0.98

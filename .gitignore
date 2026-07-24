@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Pipeline artifacts (regenerated; not source)
+outputs/
+data/traces/
+data/filtered/
+*.npz
+
+# Quarantined rogue modules — preserved on disk, kept out of the tree
+_quarantine/

@@ -1,0 +1,8 @@
+{"prompt":"What does add(2, 3) return?","answer":"5","metric":"exact_match"}
+{"prompt":"What does mul(3, 4) return?","answer":"12","metric":"exact_match"}
+{"prompt":"What does my_abs(-4) return?","answer":"4","metric":"exact_match"}
+{"prompt":"What does clamp(99, 0, 10) return?","answer":"10","metric":"exact_match"}
+{"prompt":"What does is_even(3) return?","answer":"False","metric":"exact_match"}
+{"prompt":"What does factorial(5) return?","answer":"120","metric":"exact_match"}
+{"prompt":"What does max2(1, 2) return?","answer":"2","metric":"exact_match"}
+{"prompt":"What does sum_list([1, 2, 3]) return?","answer":"6","metric":"exact_match"}
