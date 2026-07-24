@@ -33,6 +33,60 @@ def test_code_verifier_fail_no_code():
     assert ok is False and score == 0.0
 
 
+def test_code_verifier_rejects_banned_import():
+    prompt = "## Tests\nassert add(1, 2) == 3\n"
+    output = (
+        "```python\n"
+        "import os\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "```"
+    )
+    ok, score = CodeVerifier().check(prompt, output)
+    assert ok is False
+    assert score == 0.0
+
+
+def test_code_verifier_allows_allowlisted_import():
+    prompt = "## Tests\nassert floor_plus(3.7, 1) == 4\n"
+    output = (
+        "```python\n"
+        "import math\n"
+        "def floor_plus(x, y):\n"
+        "    return math.floor(x) + y\n"
+        "```"
+    )
+    ok, score = CodeVerifier().check(prompt, output)
+    assert ok is True
+    assert score == 1.0
+
+
+def test_code_verifier_rejects_dunder_attr():
+    prompt = "## Tests\nassert f() == 1\n"
+    output = (
+        "```python\n"
+        "def f():\n"
+        "    return ().__class__.__bases__[0].__subclasses__\n"
+        "```"
+    )
+    ok, _score = CodeVerifier().check(prompt, output)
+    assert ok is False
+
+
+def test_code_verifier_timeout_on_infinite_loop():
+    prompt = "## Tests\nassert True\n"
+    output = (
+        "```python\n"
+        "while True:\n"
+        "    pass\n"
+        "```"
+    )
+    # Short wall-clock timeout; rlimits also apply on POSIX.
+    ok, score = CodeVerifier(timeout_s=0.3, cpu_seconds=1).check(prompt, output)
+    assert ok is False
+    assert score == 0.0
+
+
 # --- MathVerifier -----------------------------------------------------------
 
 
