@@ -79,19 +79,39 @@ def _load_suite(suite_dir: str | Path) -> dict[str, list[dict]]:
 def _score_domain(student: Any, items: list[dict]) -> float:
     if not items:
         return 0.0
+    from unme.verify import CodeVerifier
+
     correct = 0
     seen = 0
+    code_verifier = CodeVerifier()
     for item in items:
         prompt = item.get("prompt")
-        expected = item.get("answer")
-        if not isinstance(prompt, str) or not isinstance(expected, str):
+        if not isinstance(prompt, str):
             # Malformed eval item: skip it from the denominator.
+            continue
+        # Route by metric BEFORE exact_match answer-check.
+        metric = item.get("metric", "exact_match")
+
+        if metric == "code_exec":
+            asserts = item.get("asserts")
+            if not isinstance(asserts, list) or not asserts:
+                continue
+            seen += 1
+            got = _call_student(student, prompt)
+            # Reuse CodeVerifier: synthetic prompt carries only the assert block.
+            check_prompt = "## tests\n" + "\n".join(str(a) for a in asserts)
+            ok, _score = code_verifier.check(check_prompt, got)
+            if ok:
+                correct += 1
+            continue
+
+        expected = item.get("answer")
+        if not isinstance(expected, str):
             continue
         seen += 1
         got = _call_student(student, prompt)
-        metric = item.get("metric", "exact_match")
         if metric != "exact_match":
-            # Only exact-match is implemented for now; unknown metrics score 0.
+            # Unknown metrics count as incorrect (same as prior behavior).
             continue
         if _normalize(got) == _normalize(expected):
             correct += 1

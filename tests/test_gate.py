@@ -149,3 +149,48 @@ def test_evaluate_empty_suite_dir_raises(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     with pytest.raises(ValueError):
         evaluate(lambda p: "", {}, tmp_path, 0.5)
+
+
+def test_code_exec_metric_scores_correct_and_wrong_code(tmp_path: Path):
+    """metric=code_exec grades via CodeVerifier (functional asserts), not string match."""
+    from unme.eval.harness import _score_domain
+
+    items = [
+        {
+            "prompt": "Write add(a, b).",
+            "metric": "code_exec",
+            "asserts": [
+                "assert add(2, 3) == 5",
+                "assert add(0, 0) == 0",
+            ],
+        }
+    ]
+    good = lambda p: "```python\ndef add(a, b):\n    return a + b\n```"
+    bad = lambda p: "```python\ndef add(a, b):\n    return a - b\n```"
+
+    assert _score_domain(good, items) == 1.0
+    assert _score_domain(bad, items) == 0.0
+
+
+def test_code_exec_and_exact_match_coexist(tmp_path: Path):
+    _write_suite(
+        tmp_path / "cs.jsonl",
+        "cs",
+        [
+            {
+                "prompt": "Write mul(a,b)",
+                "metric": "code_exec",
+                "asserts": ["assert mul(3, 4) == 12"],
+            },
+            {"prompt": "2+2?", "answer": "4", "metric": "exact_match"},
+        ],
+    )
+
+    def student(prompt: str) -> str:
+        if "mul" in prompt:
+            return "```python\ndef mul(a, b):\n    return a * b\n```"
+        return "4"
+
+    report = evaluate(student, {"cs": 1.0}, tmp_path, floor=0.5, candidate="mix")
+    assert report.results[0].student_score == 1.0
+    assert report.passed is True
