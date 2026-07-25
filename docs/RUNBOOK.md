@@ -7,6 +7,44 @@ and promoting only if the regression gate passes.
 Scaffold / CI smoke continues to use `configs/distill.yaml` (tiny HF models).
 **Production-shaped runs use `configs/distill.real.yaml`.**
 **Probe / step validation uses `configs/distill.probe.yaml` (3-prompt slice).**
+**Free local Mac ($0) uses `configs/distill.local.yaml` (llama.cpp + Qwen).**
+
+---
+
+## Free local run (Mac, $0)
+
+No cloud keys. Teacher = small GGUF via **llama.cpp**; student = smaller **Qwen2.5**
+checkpoint that shares the Qwen tokenizer (satisfies `train/distill.py` vocab assert).
+
+```bash
+# 1) Install llama.cpp (Homebrew)
+brew install llama.cpp
+
+# 2) Serve a 1.5B Qwen instruct GGUF on port 8080
+llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080
+
+# 3) In another terminal — confirm top-k logprobs parse (llama aliases OK)
+python scripts/probe_teacher.py --config configs/distill.local.yaml
+
+# 4) Full pipeline (generate → filter → train on CPU → eval → promote)
+unme run --config configs/distill.local.yaml
+
+# Offline-ish: reuse traces after a successful generate
+# unme run --config configs/distill.local.yaml --skip-generate
+# Skip GPU-free but still-slow train:
+# unme run --config configs/distill.local.yaml --skip-train --candidate local-smoke
+```
+
+Notes:
+
+- `teacher.base_url` is `http://127.0.0.1:8080/v1`; `api_key` empty for local server.
+- Teacher model id must match what `llama-server` reports; tokenizer is
+  `Qwen/Qwen2.5-1.5B-Instruct`. Student is `Qwen/Qwen2.5-0.5B` (same family vocab).
+- First HF tokenizer / student download needs network; afterward runs offline if
+  weights are cached.
+- CPU training on the pilot set is slow but intentional for a free laptop path.
+- The teacher client accepts llama.cpp field aliases (`top_probs`, linear `prob`,
+  `tok_str`, `completion_probabilities`) in addition to OpenAI shapes.
 
 ---
 

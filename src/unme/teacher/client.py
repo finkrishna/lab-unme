@@ -15,6 +15,7 @@ run tests against a canned response without any live network call.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Self
 
@@ -156,7 +157,10 @@ class TeacherLogitsClient:
             raise RuntimeError(f"teacher returned no choices: {data}")
         choice = choices[0]
         text = choice.get("text", "")
+        # OpenAI / vLLM: choice.logprobs; llama.cpp may use completion_probabilities.
         steps = _parse_logprobs(choice.get("logprobs"), self.topk)
+        if not steps:
+            steps = _parse_logprobs(choice.get("completion_probabilities"), self.topk)
         return TeacherCompletion(
             text=text,
             model=data.get("model", self.model),
@@ -167,37 +171,143 @@ class TeacherLogitsClient:
         )
 
 
-def _parse_logprobs(logprobs: dict[str, Any] | None, topk: int) -> list[StepLogprobs]:
-    """Tolerate both the modern "content" shape and the legacy "tokens" shape."""
+def _candidate_token_logprob(cand: dict[str, Any]) -> tuple[str, float]:
+    """Normalize one top-k candidate dict → (token_str, logprob).
+
+    Accepts aliases used by OpenAI (`token`/`logprob`) and llama.cpp
+    (`tok_str`/`prob` as linear probability, converted to log).
+    """
+    token = cand.get("token")
+    if token is None:
+        token = cand.get("tok_str")
+    if token is None:
+        token = cand.get("content")
+    token_str = str(token) if token is not None else ""
+
+    if "logprob" in cand and cand["logprob"] is not None:
+        return token_str, float(cand["logprob"])
+    # Linear probability keys → log-space (floor for numerical safety).
+    for key in ("prob", "probs"):
+        if key in cand and cand[key] is not None and not isinstance(cand[key], (list, dict)):
+            p = float(cand[key])
+            return token_str, math.log(max(p, 1e-12))
+    return token_str, 0.0
+
+
+def _top_candidates_from_entry(entry: dict[str, Any], topk: int) -> list[TopLogprob]:
+    """Extract top-k list from an entry; prefers OpenAI names, then llama aliases."""
+    raw_list = entry.get("top_logprobs")
+    if raw_list is None:
+        raw_list = entry.get("top_probs")
+    if raw_list is None:
+        raw_list = entry.get("probs")
+    if not raw_list:
+        return []
+    out: list[TopLogprob] = []
+    for item in list(raw_list)[:topk]:
+        if isinstance(item, dict):
+            tok, lp = _candidate_token_logprob(item)
+            out.append(TopLogprob(token=tok, logprob=lp))
+        # skip non-dict entries
+    return out
+
+
+def _step_from_entry(entry: dict[str, Any], topk: int) -> StepLogprobs | None:
+    """One position: sampled token + top-k candidates (OpenAI or llama naming)."""
+    if not isinstance(entry, dict):
+        return None
+    # Sampled token may live under token / tok_str / content
+    text = entry.get("token")
+    if text is None:
+        text = entry.get("tok_str")
+    if text is None:
+        text = entry.get("content")
+    text_str = str(text) if text is not None else ""
+
+    if "logprob" in entry and entry["logprob"] is not None:
+        lp = float(entry["logprob"])
+    elif "prob" in entry and entry["prob"] is not None and not isinstance(entry["prob"], (list, dict)):
+        lp = math.log(max(float(entry["prob"]), 1e-12))
+    else:
+        # Fall back to first top candidate's logprob if present
+        tops = _top_candidates_from_entry(entry, topk)
+        lp = tops[0].logprob if tops else 0.0
+        if not text_str and tops:
+            text_str = tops[0].token
+        return StepLogprobs(text=text_str, logprob=lp, top_logprobs=tops)
+
+    tops = _top_candidates_from_entry(entry, topk)
+    return StepLogprobs(text=text_str, logprob=lp, top_logprobs=tops)
+
+
+def _parse_logprobs(
+    logprobs: dict[str, Any] | list[Any] | None,
+    topk: int,
+) -> list[StepLogprobs]:
+    """Parse OpenAI logprobs shapes first; also tolerate llama.cpp aliases/shapes.
+
+    Supported:
+      - Modern OpenAI: ``{content: [{token, logprob, top_logprobs: [...]}]}``
+      - Aliases: ``top_probs``, ``prob`` (linear→log), ``tok_str``
+      - Legacy OpenAI: tokens / token_logprobs / top_logprobs maps
+      - llama.cpp list: ``[{token|content, probs:[{tok_str|token, prob}]}]``
+        (also used for ``completion_probabilities``)
+    """
     if not logprobs:
         return []
-    # Modern: content: [ {token, logprob, top_logprobs:[{token, logprob}, ...]} ]
+
+    # llama.cpp: logprobs / completion_probabilities as a list of per-token dicts
+    if isinstance(logprobs, list):
+        steps: list[StepLogprobs] = []
+        for entry in logprobs:
+            step = _step_from_entry(entry, topk) if isinstance(entry, dict) else None
+            if step is not None:
+                steps.append(step)
+        return steps
+
+    if not isinstance(logprobs, dict):
+        return []
+
+    # Modern OpenAI first: content: [ {token, logprob, top_logprobs:[{token, logprob}, ...]} ]
     content = logprobs.get("content")
     if content is not None:
-        steps: list[StepLogprobs] = []
+        steps = []
         for entry in content:
             if entry is None:
                 continue
-            top = [
-                TopLogprob(token=str(t.get("token", "")), logprob=float(t.get("logprob", 0.0)))
-                for t in (entry.get("top_logprobs") or [])[:topk]
-            ]
-            steps.append(
-                StepLogprobs(
-                    text=str(entry.get("token", "")),
-                    logprob=float(entry.get("logprob", 0.0)),
-                    top_logprobs=top,
-                )
-            )
+            if isinstance(entry, dict):
+                step = _step_from_entry(entry, topk)
+                if step is not None:
+                    steps.append(step)
         return steps
+
     # Legacy: tokens: [...], token_logprobs: [...], top_logprobs: [ {token: logprob} ]
     tokens = logprobs.get("tokens") or []
-    tlp = logprobs.get("token_logprobs") or []
-    tops = logprobs.get("top_logprobs") or []
-    steps = []
-    for i, tok in enumerate(tokens):
-        top_map = tops[i] if i < len(tops) and tops[i] else {}
-        top = [TopLogprob(token=k, logprob=float(v)) for k, v in list(top_map.items())[:topk]]
-        lp = float(tlp[i]) if i < len(tlp) and tlp[i] is not None else 0.0
-        steps.append(StepLogprobs(text=tok, logprob=lp, top_logprobs=top))
-    return steps
+    if tokens:
+        tlp = logprobs.get("token_logprobs") or []
+        tops = logprobs.get("top_logprobs") or logprobs.get("top_probs") or []
+        steps = []
+        for i, tok in enumerate(tokens):
+            top_raw = tops[i] if i < len(tops) and tops[i] else {}
+            top: list[TopLogprob] = []
+            if isinstance(top_raw, dict):
+                # map token -> logprob OR token -> linear prob
+                for k, v in list(top_raw.items())[:topk]:
+                    # values are typically already logprobs in legacy OpenAI;
+                    # if key looks like linear mass in (0,1] and all positive small, still treat as log
+                    # unless the container was named top_probs — then convert.
+                    use_linear = isinstance(tops, list) and logprobs.get("top_probs") is tops
+                    if use_linear:
+                        top.append(TopLogprob(token=str(k), logprob=math.log(max(float(v), 1e-12))))
+                    else:
+                        top.append(TopLogprob(token=str(k), logprob=float(v)))
+            elif isinstance(top_raw, list):
+                for item in top_raw[:topk]:
+                    if isinstance(item, dict):
+                        t, lp = _candidate_token_logprob(item)
+                        top.append(TopLogprob(token=t, logprob=lp))
+            lp = float(tlp[i]) if i < len(tlp) and tlp[i] is not None else 0.0
+            steps.append(StepLogprobs(text=str(tok), logprob=lp, top_logprobs=top))
+        return steps
+
+    return []

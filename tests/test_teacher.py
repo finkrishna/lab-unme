@@ -129,4 +129,118 @@ def test_generate_emits_valid_trace(tmp_path):
     assert tr.hidden_path is not None and Path(tr.hidden_path).exists()
 
 
+# --- llama.cpp / alternate logprobs shapes ------------------------------------
+
+
+def test_parse_logprobs_top_probs_alias():
+    """(a) top_probs naming instead of top_logprobs."""
+    from unme.teacher.client import _parse_logprobs
+
+    logprobs = {
+        "content": [
+            {
+                "token": "Hi",
+                "logprob": -0.5,
+                "top_probs": [
+                    {"token": "Hi", "logprob": -0.5},
+                    {"token": "Hey", "logprob": -1.5},
+                ],
+            }
+        ]
+    }
+    steps = _parse_logprobs(logprobs, topk=2)
+    assert len(steps) == 1
+    assert steps[0].text == "Hi"
+    assert steps[0].logprob == pytest.approx(-0.5)
+    assert len(steps[0].top_logprobs) == 2
+    assert steps[0].top_logprobs[0].token == "Hi"
+    assert steps[0].top_logprobs[1].token == "Hey"
+
+
+def test_parse_logprobs_linear_prob_to_log():
+    """(b) linear `prob` values are converted via math.log."""
+    import math
+
+    from unme.teacher.client import _parse_logprobs
+
+    p0, p1 = 0.8, 0.2
+    logprobs = {
+        "content": [
+            {
+                "tok_str": "A",
+                "prob": p0,
+                "top_probs": [
+                    {"tok_str": "A", "prob": p0},
+                    {"tok_str": "B", "prob": p1},
+                ],
+            }
+        ]
+    }
+    steps = _parse_logprobs(logprobs, topk=2)
+    assert len(steps) == 1
+    assert steps[0].text == "A"
+    assert steps[0].logprob == pytest.approx(math.log(p0))
+    assert steps[0].top_logprobs[0].logprob == pytest.approx(math.log(p0))
+    assert steps[0].top_logprobs[1].token == "B"
+    assert steps[0].top_logprobs[1].logprob == pytest.approx(math.log(p1))
+
+
+def test_parse_completion_probabilities_llamacpp_shape():
+    """(c) llama.cpp completion_probabilities-style list on the choice."""
+    import math
+
+    model = _request_count_model()
+    p_hi, p_lo = 0.9, 0.1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cmpl-llama",
+                "model": model,
+                "choices": [
+                    {
+                        "text": "OK",
+                        "finish_reason": "stop",
+                        # llama.cpp often puts this beside (or instead of) logprobs
+                        "completion_probabilities": [
+                            {
+                                "content": "OK",
+                                "probs": [
+                                    {"tok_str": "OK", "prob": p_hi},
+                                    {"tok_str": "No", "prob": p_lo},
+                                ],
+                            },
+                            {
+                                "token": "!",
+                                "probs": [
+                                    {"token": "!", "prob": 0.7},
+                                    {"tok_str": ".", "prob": 0.3},
+                                ],
+                            },
+                        ],
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+            },
+        )
+
+    with TeacherLogitsClient(
+        base_url="http://localhost:8080/v1",
+        model=model,
+        topk=2,
+        temperature=1.0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        comp = client.complete("hi")
+
+    assert len(comp.steps) == 2
+    assert comp.steps[0].text == "OK"
+    assert comp.steps[0].top_logprobs[0].token == "OK"
+    assert comp.steps[0].top_logprobs[0].logprob == pytest.approx(math.log(p_hi))
+    assert comp.steps[0].top_logprobs[1].logprob == pytest.approx(math.log(p_lo))
+    assert comp.steps[1].text == "!"
+    assert len(comp.steps[1].top_logprobs) == 2
+
+
 # helpers ---------------------------------------------------------------------

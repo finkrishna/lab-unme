@@ -1,0 +1,54 @@
+# Lab UnMe — FREE LOCAL run (Mac / $0 cloud).
+#
+# Prerequisites:
+#   brew install llama.cpp
+#   llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080
+#
+# Then:
+#   python scripts/probe_teacher.py --config configs/distill.local.yaml
+#   unme run --config configs/distill.local.yaml
+#
+# Training loop in train/distill.py is CPU-friendly (slow but fine for a tiny pilot).
+# Student uses the SAME Qwen2.5 tokenizer family as the teacher → vocab assert passes.
+# Do not edit configs/distill.yaml / distill.real.yaml / distill.probe.yaml for this path.
+
+teacher:
+  base_url: "http://127.0.0.1:8080/v1"
+  # Served name as registered by llama-server (often matches the HF id or a short alias).
+  model: "Qwen2.5-1.5B-Instruct"
+  # HF tokenizer used by generate.py to map teacher token strings → ids.
+  tokenizer: "Qwen/Qwen2.5-1.5B-Instruct"
+  topk: 20
+  temperature: 1.0
+  max_tokens: 256
+  timeout: 120.0
+  api_key: ""
+  emit_hidden_states: false
+
+student:
+  # Smaller Qwen2.5 checkpoint; same tokenizer lineage as teacher (shared vocab).
+  model: "Qwen/Qwen2.5-0.5B"
+  dtype: "float32"
+
+data:
+  prompts: "data/prompts/pilot.jsonl"
+  traces: "data/traces"
+  filtered: "data/filtered"
+  max_seq_len: 1024
+
+distill:
+  temperature: 2.0
+  alpha_kl: 1.0
+  alpha_hidden: 0.0
+  alpha_ce: 0.1
+  hidden_layer_map: {2: 4, 4: 8}
+  lr: 1.0e-4
+  batch_size: 1
+  epochs: 1
+  grad_clip: 1.0
+
+eval:
+  suite: "data/eval"
+  regression_floor: 0.98
+
+output_dir: "outputs/student-local"
