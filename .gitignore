@@ -11,8 +11,8 @@ venv/
 
 # Pipeline artifacts (regenerated; not source)
 outputs/
-data/traces/
-data/filtered/
+data/traces*/
+data/filtered*/
 *.npz
 
 # Quarantined rogue modules — preserved on disk, kept out of the tree

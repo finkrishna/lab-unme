@@ -1,0 +1,52 @@
+# Lab UnMe — GENERALIZATION run (Mac / $0).
+#
+# Trains on ~37 varied coding tasks and evaluates on 9 HELD-OUT tasks the student
+# never saw — measuring generalization (functional code-exec), not memorization.
+#
+# Prereqs:
+#   llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080
+#   .venv/bin/python scripts/gen_coding_tasks.py     # writes the train/eval sets
+# Run:
+#   unme run --config configs/distill.general.yaml --candidate general-qwen
+#
+# Requires the code_exec eval metric (see the pending Grok task) for eval to score.
+
+teacher:
+  base_url: "http://127.0.0.1:8080/v1"
+  model: "Qwen2.5-1.5B-Instruct"
+  tokenizer: "Qwen/Qwen2.5-1.5B-Instruct"
+  topk: 20
+  temperature: 0.7          # a bit lower than pilot → more solutions pass the asserts
+  max_tokens: 256
+  timeout: 120.0
+  api_key: ""
+  emit_hidden_states: false
+
+student:
+  model: "Qwen/Qwen2.5-0.5B"
+  dtype: "float32"
+
+data:
+  prompts: "data/prompts/coding_train.jsonl"   # 37 training tasks
+  traces: "data/traces_general"                # dedicated dirs (don't mix with the pilot)
+  filtered: "data/filtered_general"
+  max_seq_len: 512
+
+distill:
+  temperature: 2.0
+  alpha_kl: 1.0
+  alpha_hidden: 0.0
+  alpha_ce: 0.1
+  hidden_layer_map: {2: 4, 4: 8}
+  lr: 1.0e-4
+  batch_size: 1
+  epochs: 5                 # revisit the training tasks; watch per-epoch loss fall
+  grad_clip: 1.0
+
+eval:
+  suite: "data/eval_general"                    # coding.jsonl with metric: code_exec
+  regression_floor: 0.30                         # realistic for a 0.5B; promotion still likely refused
+  teacher_scores:
+    coding: 1.0
+
+output_dir: "outputs/student-general"
