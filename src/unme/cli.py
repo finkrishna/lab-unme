@@ -171,17 +171,37 @@ def inspect_cmd(
         Path,
         typer.Option("--traces", "-t", help="Trace JSONL file or directory"),
     ] = _DEFAULT_TRACES,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config for teacher.tokenizer / teacher.model (decode ids → text)",
+        ),
+    ] = None,
     max_positions: Annotated[
         int,
         typer.Option("--max-positions", help="Cap printed output positions"),
     ] = 64,
 ) -> None:
-    """Pretty-print the first Trace's teacher top-k distribution (token ids + probs)."""
+    """Pretty-print the first Trace's teacher top-k (decoded tokens when possible)."""
     from unme.inspect import inspect_traces
 
-    console.print(f"[bold]inspect[/bold] traces={traces}")
+    tokenizer_name: str | None = None
+    if config is not None and config.exists():
+        cfg = _load_yaml(config)
+        tcfg = cfg.get("teacher") or {}
+        tokenizer_name = tcfg.get("tokenizer") or tcfg.get("model")
+    console.print(
+        f"[bold]inspect[/bold] traces={traces} "
+        f"tokenizer={tokenizer_name or '(ids only)'}"
+    )
     try:
-        table = inspect_traces(traces, max_positions=max_positions)
+        table = inspect_traces(
+            traces,
+            max_positions=max_positions,
+            tokenizer_name=tokenizer_name,
+        )
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]inspect failed:[/red] {e}")
         raise typer.Exit(1) from e

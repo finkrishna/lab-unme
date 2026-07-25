@@ -56,3 +56,23 @@ def test_inspect_traces_reads_jsonl(tmp_path: Path):
     assert "inspect-1" in out
     loaded = load_first_trace(tmp_path)  # dir form
     assert loaded.prompt_id == "inspect-1"
+
+
+class _FakeTokenizer:
+    """Minimal decode map for unit tests (no HF download)."""
+
+    def decode(self, ids, skip_special_tokens=False):
+        del skip_special_tokens
+        table = {10: "hello", 11: "world", 20: "foo", 21: "bar"}
+        return table.get(int(ids[0]), f"<{ids[0]}>")
+
+
+def test_format_topk_table_decodes_token_strings():
+    tr = _fixture_trace()
+    text = format_topk_table(tr, tokenizer=_FakeTokenizer())
+    assert "hello" in text
+    assert "world" in text
+    assert "foo" in text
+    assert "decoded" in text
+    # probs still present
+    assert "0.7000" in text or "0.7" in text
