@@ -29,6 +29,17 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _resolve_student_dir(cfg: dict, override: Path | None = None) -> Path:
+    """Single source of truth for the student checkpoint directory.
+
+    Priority: explicit CLI override → ``config.output_dir`` → ``outputs/student``.
+    Used by both ``train_cmd`` and ``eval_cmd`` so run→eval never disagree.
+    """
+    if override is not None:
+        return Path(override)
+    return Path(cfg.get("output_dir") or "outputs/student")
+
+
 @app.command("generate")
 def generate_cmd(
     config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
@@ -91,7 +102,13 @@ def train_cmd(
     data: Annotated[
         Path | None, typer.Option(help="Filtered traces JSONL/dir")
     ] = None,
-    out: Annotated[Path, typer.Option("--out")] = _DEFAULT_OUT,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out",
+            help="Student checkpoint dir (default: config.output_dir or outputs/student)",
+        ),
+    ] = None,
 ) -> None:
     """Stage 2: run real distillation training (``unme.train.distill.train``)."""
     import tempfile
@@ -103,8 +120,9 @@ def train_cmd(
     if data is not None:
         data_cfg["filtered"] = str(data)
     data_path = Path(data_cfg.get("filtered", "data/filtered"))
-    cfg["output_dir"] = str(out)
-    console.print(f"[bold]train[/bold] data={data_path} out={out}")
+    student_dir = _resolve_student_dir(cfg, out)
+    cfg["output_dir"] = str(student_dir)
+    console.print(f"[bold]train[/bold] data={data_path} out={student_dir}")
 
     kept = data_path / "kept.jsonl" if data_path.is_dir() else data_path
     if not Path(kept).exists():
@@ -229,7 +247,7 @@ def eval_cmd(
     # Normalize keys to str, values to float
     teacher_scores = {str(k): float(v) for k, v in dict(teacher_scores).items()}
 
-    ckpt = student_path or Path(cfg.get("output_dir") or "outputs/student")
+    ckpt = _resolve_student_dir(cfg, student_path)
     console.print(
         f"[bold]eval[/bold] candidate={candidate} floor={floor} "
         f"suite={suite} student={ckpt}"
@@ -368,14 +386,14 @@ def run_cmd(
     # 2) filter
     filter_cmd(traces=traces_dir, out=filtered_dir, domain=domain)
 
-    # 3) train (or dataset-load only)
+    # 3) train (or dataset-load only) — config.output_dir is the single source of truth
     if skip_train:
         console.print("[yellow]--skip-train: omitting train_cmd[/yellow]")
         _dataset_load_smoke(config, data=filtered_dir)
     else:
-        train_cmd(config=config, data=filtered_dir, out=_DEFAULT_OUT)
+        train_cmd(config=config, data=filtered_dir)
 
-    # 4) eval
+    # 4) eval — same student dir resolution as train
     eval_cmd(candidate=candidate, config=config, registry=registry)
 
     # 5) promote (may refuse until real eval scores pass the gate)
