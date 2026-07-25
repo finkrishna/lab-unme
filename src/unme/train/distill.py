@@ -146,6 +146,26 @@ def _is_zero_tensor(t: torch.Tensor | None) -> bool:
     return bool(t.abs().sum().item() == 0)
 
 
+def _resolve_kept_traces(filtered: str | Path) -> Path:
+    """Map ``data.filtered`` to the Trace JSONL the trainer must consume.
+
+    - If ``filtered`` is a directory, use ``<filtered>/kept.jsonl`` only
+      (sibling ``verdicts.jsonl`` is FilterVerdict rows, not training traces).
+    - If ``filtered`` is a file path, use it as-is.
+    """
+    path = Path(filtered)
+    if path.is_dir():
+        kept = path / "kept.jsonl"
+        if not kept.is_file():
+            raise FileNotFoundError(
+                f"filtered dir {path} has no kept.jsonl — run `unme filter` first"
+            )
+        return kept
+    if not path.is_file():
+        raise FileNotFoundError(f"filtered traces not found: {path}")
+    return path
+
+
 def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
     """Run one distillation pass per ``configs/distill.yaml``.
 
@@ -160,7 +180,9 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
     if not student_name:
         raise ValueError("distill config: student.model is required")
     data_cfg = cfg.get("data") or {}
-    traces_path = data_cfg.get("filtered") or "data/filtered"
+    # Filter stage writes kept.jsonl (Trace rows) + verdicts.jsonl under data.filtered.
+    # Always train on kept traces only — never glob the whole dir (verdicts are not Traces).
+    traces_path = _resolve_kept_traces(data_cfg.get("filtered") or "data/filtered")
     d_cfg = cfg.get("distill") or {}
     temperature = float(d_cfg.get("temperature", 1.0))
     alpha_kl = float(d_cfg.get("alpha_kl", 1.0))

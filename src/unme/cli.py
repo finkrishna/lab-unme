@@ -93,9 +93,17 @@ def train_cmd(
     ] = None,
     out: Annotated[Path, typer.Option("--out")] = _DEFAULT_OUT,
 ) -> None:
-    """Stage 2: distillation training over filtered traces (spec launcher)."""
+    """Stage 2: run real distillation training (``unme.train.distill.train``)."""
+    import tempfile
+
+    import yaml
+
     cfg = _load_yaml(config) if config.exists() else {}
-    data_path = data or Path((cfg.get("data") or {}).get("filtered", "data/filtered"))
+    data_cfg = cfg.setdefault("data", {})
+    if data is not None:
+        data_cfg["filtered"] = str(data)
+    data_path = Path(data_cfg.get("filtered", "data/filtered"))
+    cfg["output_dir"] = str(out)
     console.print(f"[bold]train[/bold] data={data_path} out={out}")
 
     kept = data_path / "kept.jsonl" if data_path.is_dir() else data_path
@@ -104,16 +112,33 @@ def train_cmd(
         raise typer.Exit(1)
 
     try:
-        from unme.data.dataset import DistillDataset
-
-        ds = DistillDataset(kept if Path(kept).suffix == ".jsonl" else data_path)
-        console.print(f"Loaded DistillDataset n={len(ds)}")
+        from unme.train.distill import train as run_distill
     except ImportError:
-        console.print("[yellow]torch not installed; skipping dataset load smoke check[/yellow]")
+        console.print(
+            "[red]torch/train stack not installed. "
+            "pip install 'lab-unme[train]' to run distillation.[/red]"
+        )
+        raise typer.Exit(1)
 
-    out.mkdir(parents=True, exist_ok=True)
+    # Merge CLI overrides into a working config file for train().
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    ) as tmp:
+        yaml.safe_dump(cfg, tmp)
+        work_cfg = Path(tmp.name)
+    try:
+        summary = run_distill(work_cfg)
+    finally:
+        work_cfg.unlink(missing_ok=True)
+
+    hist = summary.get("loss_history") or []
+    n_steps = int(summary.get("n_steps") or len(hist))
+    first = hist[0] if hist else None
+    last = hist[-1] if hist else None
     console.print(
-        "[green]Data ready.[/green] Launch train/distill.py (or your trainer) with this data path."
+        f"[green]train done[/green] n_steps={n_steps} "
+        f"loss_first={first} loss_last={last} "
+        f"output_dir={summary.get('output_dir')}"
     )
 
 
