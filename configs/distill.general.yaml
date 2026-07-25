@@ -23,7 +23,10 @@ teacher:
   emit_hidden_states: false
 
 student:
-  model: "Qwen/Qwen2.5-0.5B"
+  # Instruct (not base!) — base 0.5B just parrots the prompt's assert block instead of
+  # writing a function. Instruct has the "respond to the request" prior. Same Qwen
+  # tokenizer, so the vocab invariant still holds.
+  model: "Qwen/Qwen2.5-0.5B-Instruct"
   dtype: "float32"
 
 data:
