@@ -147,34 +147,119 @@ def train_cmd(
         console.print(f"epochs: {trend}")
 
 
+@app.command("inspect")
+def inspect_cmd(
+    traces: Annotated[
+        Path,
+        typer.Option("--traces", "-t", help="Trace JSONL file or directory"),
+    ] = _DEFAULT_TRACES,
+    max_positions: Annotated[
+        int,
+        typer.Option("--max-positions", help="Cap printed output positions"),
+    ] = 64,
+) -> None:
+    """Pretty-print the first Trace's teacher top-k distribution (token ids + probs)."""
+    from unme.inspect import inspect_traces
+
+    console.print(f"[bold]inspect[/bold] traces={traces}")
+    try:
+        table = inspect_traces(traces, max_positions=max_positions)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]inspect failed:[/red] {e}")
+        raise typer.Exit(1) from e
+    console.print(table)
+
+
+def load_student_callable(
+    checkpoint: str | Path,
+    *,
+    max_new_tokens: int = 64,
+):
+    """Build a ``(prompt: str) -> str`` callable from an HF causal LM checkpoint.
+
+    Separated for tests (monkeypatch with a stub). Requires torch/transformers.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    path = str(checkpoint)
+    tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True)
+    model.eval()
+
+    def student(prompt: str) -> str:
+        enc = tok(prompt, return_tensors="pt")
+        with torch.no_grad():
+            out = model.generate(
+                **enc,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tok.pad_token_id,
+            )
+        new_tokens = out[0, enc["input_ids"].shape[1] :]
+        return tok.decode(new_tokens, skip_special_tokens=True)
+
+    return student
+
+
 @app.command("eval")
 def eval_cmd(
     candidate: Annotated[str, typer.Argument(help="Candidate name / checkpoint id")],
     config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
     registry: Annotated[Path, typer.Option("--registry", "-r")] = _DEFAULT_REGISTRY,
+    student_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--student",
+            help="HF checkpoint dir (default: config output_dir or outputs/student)",
+        ),
+    ] = None,
 ) -> None:
-    """Stage 0/3: evaluate candidate, write GateReport into the registry."""
+    """Stage 0/3: score the trained student on data/eval and write a GateReport."""
+    from unme.eval.harness import evaluate
     from unme.registry import Registry
-    from unme.schemas import EvalResult, GateReport
 
     cfg = _load_yaml(config) if config.exists() else {}
-    floor = float((cfg.get("eval") or {}).get("regression_floor", 0.98))
+    eval_cfg = cfg.get("eval") or {}
+    floor = float(eval_cfg.get("regression_floor", 0.98))
+    suite = Path(eval_cfg.get("suite", "data/eval"))
+    teacher_scores = eval_cfg.get("teacher_scores") or {"cs": 1.0}
+    # Normalize keys to str, values to float
+    teacher_scores = {str(k): float(v) for k, v in dict(teacher_scores).items()}
 
-    console.print(f"[bold]eval[/bold] candidate={candidate} floor={floor}")
-    report = GateReport(
+    ckpt = student_path or Path(cfg.get("output_dir") or "outputs/student")
+    console.print(
+        f"[bold]eval[/bold] candidate={candidate} floor={floor} "
+        f"suite={suite} student={ckpt}"
+    )
+
+    try:
+        student = load_student_callable(ckpt)
+    except Exception as e:
+        console.print(f"[red]failed to load student from {ckpt}:[/red] {e}")
+        raise typer.Exit(1) from e
+
+    report = evaluate(
+        student,
+        teacher_scores,
+        suite,
+        floor,
         candidate=candidate,
-        results=[
-            EvalResult(domain="math", metric="holdout", student_score=0.0, teacher_score=1.0),
-        ],
-        regression_floor=floor,
     )
     reg = Registry(registry)
     path = reg.record(candidate, report)
+    for r in report.results:
+        console.print(
+            f"  domain={r.domain} student={r.student_score:.4f} "
+            f"teacher={r.teacher_score:.4f} ratio={r.ratio:.4f}"
+        )
     console.print(f"Wrote {path} passed={report.passed}")
     if not report.passed:
         console.print(
-            "[yellow]Gate not passed (placeholder scores). "
-            "Record real eval results before promote.[/yellow]"
+            "[yellow]Gate not passed (real ratios below floor). "
+            "Improve student or lower eval.regression_floor before promote.[/yellow]"
         )
 
 
