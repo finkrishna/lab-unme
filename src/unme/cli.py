@@ -132,6 +132,7 @@ def train_cmd(
         work_cfg.unlink(missing_ok=True)
 
     hist = summary.get("loss_history") or []
+    epoch_losses = summary.get("epoch_losses") or []
     n_steps = int(summary.get("n_steps") or len(hist))
     first = hist[0] if hist else None
     last = hist[-1] if hist else None
@@ -140,6 +141,10 @@ def train_cmd(
         f"loss_first={first} loss_last={last} "
         f"output_dir={summary.get('output_dir')}"
     )
+    if epoch_losses:
+        # e.g. "epochs: 3.41 → 2.98 → 2.55"
+        trend = " → ".join(f"{x:.4g}" for x in epoch_losses)
+        console.print(f"epochs: {trend}")
 
 
 @app.command("eval")

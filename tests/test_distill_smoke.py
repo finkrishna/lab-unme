@@ -97,3 +97,55 @@ def test_distill_smoke_two_steps(tmp_path: Path) -> None:
         assert isinstance(loss, float)
         # finite (NaN/Inf guarded inside train() but assert defensively).
         assert math.isfinite(loss)
+    # Default smoke config uses epochs: 1 → one epoch mean.
+    assert "epoch_losses" in summary
+    assert len(summary["epoch_losses"]) == 1
+    assert math.isfinite(summary["epoch_losses"][0])
+
+
+def test_distill_epoch_losses_length_matches_epochs(tmp_path: Path) -> None:
+    """summary['epoch_losses'] has one mean per epoch (tiny 2-epoch run)."""
+    model = "hf-internal-testing/tiny-random-gpt2"
+    vocab = 1000
+    filtered_dir = tmp_path / "filtered"
+    filtered_dir.mkdir()
+    kept = filtered_dir / "kept.jsonl"
+    rows = [
+        _make_trace("p1", n_in=8, n_out=4, k=4, vocab=vocab),
+        _make_trace("p2", n_in=6, n_out=4, k=4, vocab=vocab),
+    ]
+    with kept.open("wb") as f:
+        for r in rows:
+            f.write(orjson.dumps(r))
+            f.write(b"\n")
+
+    cfg_path = tmp_path / "distill.yaml"
+    import yaml
+
+    n_epochs = 2
+    cfg = {
+        "student": {"model": model, "dtype": "float32"},
+        "data": {"filtered": str(filtered_dir)},
+        "distill": {
+            "temperature": 2.0,
+            "alpha_kl": 1.0,
+            "alpha_hidden": 0.0,
+            "alpha_ce": 0.1,
+            "hidden_layer_map": {},
+            "lr": 2.0e-4,
+            "batch_size": 1,
+            "epochs": n_epochs,
+            "grad_clip": 1.0,
+        },
+        "output_dir": str(tmp_path / "student"),
+    }
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+    summary = train(cfg_path)
+    assert len(summary["epoch_losses"]) == n_epochs
+    assert summary.get("n_epochs") == n_epochs
+    for el in summary["epoch_losses"]:
+        assert isinstance(el, float) and math.isfinite(el)
+    # loss_history still has every step
+    assert len(summary["loss_history"]) == summary["n_steps"]
+    assert summary["n_steps"] >= n_epochs  # at least one step per epoch

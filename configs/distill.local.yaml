@@ -44,7 +44,7 @@ distill:
   hidden_layer_map: {2: 4, 4: 8}
   lr: 1.0e-4
   batch_size: 1
-  epochs: 1
+  epochs: 5   # revisit kept traces so a per-epoch loss trend is visible on CPU-tiny data
   grad_clip: 1.0
 
 eval:

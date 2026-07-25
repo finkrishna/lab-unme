@@ -215,8 +215,11 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
         proj.to(device)
 
     history: list[float] = []
+    epoch_losses: list[float] = []
     dataset_len = len(ds)
-    for _epoch in range(max(1, epochs)):
+    n_epochs = max(1, epochs)
+    for _epoch in range(n_epochs):
+        epoch_step_losses: list[float] = []
         for batch in loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -298,9 +301,17 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
                 if proj_params:
                     torch.nn.utils.clip_grad_norm_(proj_params, grad_clip)
             optim.step()
-            history.append(float(total.detach()))
+            step_loss = float(total.detach())
+            history.append(step_loss)
+            epoch_step_losses.append(step_loss)
             if not torch.isfinite(total):
                 raise RuntimeError(f"non-finite loss: {float(total)}")
+
+        if epoch_step_losses:
+            epoch_losses.append(sum(epoch_step_losses) / len(epoch_step_losses))
+        else:
+            # Empty loader — still emit one mean slot so len(epoch_losses) == epochs.
+            epoch_losses.append(0.0)
 
     output_dir = Path(cfg.get("output_dir") or "outputs/student")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +321,9 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
     return {
         "n_steps": len(history),
         "n_examples": dataset_len,
+        "n_epochs": n_epochs,
         "loss_history": history,
+        "epoch_losses": epoch_losses,
         "output_dir": str(output_dir),
     }
 
