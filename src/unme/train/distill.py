@@ -146,6 +146,25 @@ def _is_zero_tensor(t: torch.Tensor | None) -> bool:
     return bool(t.abs().sum().item() == 0)
 
 
+def _select_device(d_cfg: dict) -> Any:
+    """Pick training device: optional distill.device override, else mps → cuda → cpu.
+
+    Note: on Apple Silicon, set ``PYTORCH_ENABLE_MPS_FALLBACK=1`` in the environment
+    so ops not yet implemented on MPS fall back to CPU instead of hard-failing.
+    """
+    _require_torch()
+    assert torch is not None
+    forced = d_cfg.get("device")
+    if forced is not None and str(forced).strip():
+        return torch.device(str(forced).strip())
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def _resolve_kept_traces(filtered: str | Path) -> Path:
     """Map ``data.filtered`` to the Trace JSONL the trainer must consume.
 
@@ -209,7 +228,9 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
     proj_params = [p for proj in projs.values() for p in proj.parameters()]
     optim = torch.optim.AdamW(list(model.parameters()) + proj_params, lr=lr)
 
-    device = torch.device("cpu")
+    # Auto: mps → cuda → cpu; override with distill.device (e.g. "cpu" for CI).
+    # PYTORCH_ENABLE_MPS_FALLBACK=1 recommended when using MPS (see _select_device).
+    device = _select_device(d_cfg)
     model.to(device)
     for proj in projs.values():
         proj.to(device)
@@ -324,6 +345,7 @@ def train(config_path: str | Path = "configs/distill.yaml") -> dict[str, Any]:
         "n_epochs": n_epochs,
         "loss_history": history,
         "epoch_losses": epoch_losses,
+        "device": str(device),
         "output_dir": str(output_dir),
     }
 
